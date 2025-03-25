@@ -1,8 +1,8 @@
 /**
- * Simple Wayland Client using XDG Shell with visible content
+ * Wayland Client with Clipboard Monitoring
  * 
- * This example demonstrates a basic Wayland client that creates a fullscreen window using xdg-shell protocol.
- * Build with: gcc -o main.out src/main.c src/xdg-shell.c src/font8x8.c -lwayland-client -lrt
+ * This example creates a Wayland window and listens for clipboard (selection) events.
+ * Build with: gcc -o clipboard-monitor clipboard-monitor.c xdg-shell.c -lwayland-client -lrt
  */
 
 #include <stdio.h>
@@ -30,6 +30,13 @@ struct client_state {
     struct xdg_toplevel *xdg_toplevel;
     struct wl_shm *shm;
     struct wl_buffer *buffer;
+    
+    // Clipboard-related objects
+    struct wl_seat *seat;
+    struct wl_data_device_manager *data_device_manager;
+    struct wl_data_device *data_device;
+    struct wl_data_offer *current_offer;
+    
     bool running;
     int width, height;
 };
@@ -115,6 +122,105 @@ static const struct xdg_wm_base_listener xdg_wm_base_listener = {
     .ping = xdg_wm_base_ping,
 };
 
+// Clipboard data offer listeners
+static void
+data_offer_offer(void *data, struct wl_data_offer *offer, const char *mime_type)
+{
+    printf("Data offer with MIME type: %s\n", mime_type);
+}
+
+static const struct wl_data_offer_listener data_offer_listener = {
+    .offer = data_offer_offer
+};
+
+// Handle clipboard text content
+static void
+receive_clipboard_data(struct client_state *state, const char *mime_type)
+{
+    if (!state->current_offer) {
+        return;
+    }
+    
+    // Create pipes for reading data
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        perror("pipe");
+        return;
+    }
+    
+    // Send the request to read the data
+    wl_data_offer_receive(state->current_offer, mime_type, pipefd[1]);
+    close(pipefd[1]); // Close write end immediately after request
+    
+    // Dispatch events to ensure the data is sent through the pipe
+    wl_display_flush(state->display);
+    
+    // Read the data from the pipe
+    char buffer[4096];
+    ssize_t bytes_read = read(pipefd[0], buffer, sizeof(buffer) - 1);
+    close(pipefd[0]);
+    
+    if (bytes_read > 0) {
+        buffer[bytes_read] = '\0';
+        printf("*** Clipboard content ***\n%s\n********************\n", buffer);
+    } else if (bytes_read == 0) {
+        printf("Empty clipboard data\n");
+    } else {
+        perror("read");
+    }
+}
+
+// Data device listeners
+static void
+data_device_data_offer(void *data, struct wl_data_device *data_device,
+                      struct wl_data_offer *offer)
+{
+    struct client_state *state = data;
+    
+    printf("New data offer received\n");
+    
+    // Set up listener for the data offer
+    wl_data_offer_add_listener(offer, &data_offer_listener, state);
+}
+
+static void
+data_device_selection(void *data, struct wl_data_device *data_device,
+                     struct wl_data_offer *offer)
+{
+    struct client_state *state = data;
+    
+    printf("Selection changed\n");
+    
+    // Update current offer
+    state->current_offer = offer;
+    
+    if (offer) {
+        // Try to receive text data
+        receive_clipboard_data(state, "text/plain;charset=utf-8");
+    }
+}
+
+static const struct wl_data_device_listener data_device_listener = {
+    .data_offer = data_device_data_offer,
+    .enter = NULL,
+    .leave = NULL,
+    .motion = NULL,
+    .drop = NULL,
+    .selection = data_device_selection
+};
+
+// Seat listener
+static void
+seat_capabilities(void *data, struct wl_seat *seat, uint32_t capabilities)
+{
+    // Not used for clipboard monitoring
+}
+
+static const struct wl_seat_listener seat_listener = {
+    .capabilities = seat_capabilities,
+    .name = NULL
+};
+
 // Registry listener callbacks
 static void
 registry_handle_global(void *data, struct wl_registry *registry,
@@ -137,6 +243,14 @@ registry_handle_global(void *data, struct wl_registry *registry,
     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
         state->shm = wl_registry_bind(registry, id, &wl_shm_interface, 1);
         printf("Found wl_shm\n");
+    } else if (strcmp(interface, wl_seat_interface.name) == 0) {
+        state->seat = wl_registry_bind(registry, id, &wl_seat_interface, 1);
+        wl_seat_add_listener(state->seat, &seat_listener, state);
+        printf("Found seat\n");
+    } else if (strcmp(interface, wl_data_device_manager_interface.name) == 0) {
+        state->data_device_manager = wl_registry_bind(
+            registry, id, &wl_data_device_manager_interface, 1);
+        printf("Found data_device_manager\n");
     }
 }
 
@@ -240,6 +354,7 @@ main(int argc, char **argv)
     wl_display_roundtrip(state.display);
     wl_display_roundtrip(state.display); // Sometimes need an extra roundtrip
 
+    // Check for required interfaces
     if (!state.compositor) {
         fprintf(stderr, "Could not find compositor\n");
         return 1;
@@ -253,6 +368,16 @@ main(int argc, char **argv)
     if (!state.shm) {
         fprintf(stderr, "Could not find wl_shm\n");
         return 1;
+    }
+    
+    // Set up the data device (for clipboard monitoring)
+    if (state.seat && state.data_device_manager) {
+        state.data_device = wl_data_device_manager_get_data_device(
+            state.data_device_manager, state.seat);
+        wl_data_device_add_listener(state.data_device, &data_device_listener, &state);
+        printf("Set up data device for clipboard monitoring\n");
+    } else {
+        fprintf(stderr, "Clipboard monitoring not available\n");
     }
 
     // Create a surface
@@ -279,21 +404,24 @@ main(int argc, char **argv)
     xdg_toplevel_add_listener(state.xdg_toplevel, &xdg_toplevel_listener, &state);
 
     // Configure the toplevel window
-    xdg_toplevel_set_title(state.xdg_toplevel, "Simple Wayland XDG Client");
+    xdg_toplevel_set_title(state.xdg_toplevel, "Wayland Clipboard Monitor");
     xdg_toplevel_set_min_size(state.xdg_toplevel, 200, 100);
-    xdg_toplevel_set_fullscreen(state.xdg_toplevel, NULL); // Request fullscreen mode
+    // xdg_toplevel_set_fullscreen(state.xdg_toplevel, NULL); // Optional fullscreen mode
     
     // Commit the surface to tell the compositor we're ready
     wl_surface_commit(state.surface);
 
     printf("Window created, entering main loop\n");
+    printf("Monitoring clipboard events. Copy text in another application to see it appear here.\n");
 
     // Main loop
     while (state.running && wl_display_dispatch(state.display) != -1) {
-        // In a real application, you would handle events and drawing here
+        // Event handling is done in the dispatch function above
     }
 
     // Clean up
+    if (state.data_device)
+        wl_data_device_destroy(state.data_device);
     if (state.buffer)
         wl_buffer_destroy(state.buffer);
     if (state.xdg_toplevel)
@@ -304,6 +432,10 @@ main(int argc, char **argv)
         wl_surface_destroy(state.surface);
     if (state.xdg_wm_base)
         xdg_wm_base_destroy(state.xdg_wm_base);
+    if (state.data_device_manager)
+        wl_data_device_manager_destroy(state.data_device_manager);
+    if (state.seat)
+        wl_seat_destroy(state.seat);
     if (state.shm)
         wl_shm_destroy(state.shm);
     if (state.compositor)
