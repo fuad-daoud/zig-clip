@@ -1,16 +1,8 @@
 /**
  * Wayland Clipboard Monitor using wlr-data-control protocol
  * 
- * This monitors clipboard events using the wlr-data-control protocol, which works 
- * in wlroots-based compositors like Sway, Wayfire, etc.
- * 
- * Build with:
- * 1. First generate protocol headers:
- *    wayland-scanner private-code < /path/to/wlr-data-control-unstable-v1.xml > wlr-data-control-protocol.c
- *    wayland-scanner client-header < /path/to/wlr-data-control-unstable-v1.xml > wlr-data-control-unstable-v1.h
- * 
- * 2. Then compile:
- *    gcc -o wlr-clipboard-monitor wlr-clipboard-monitor.c wlr-data-control-protocol.c -lwayland-client
+ * This monitors clipboard events and outputs just the text content.
+ * Works with wlroots-based compositors like Sway.
  */
 
 #include <stdio.h>
@@ -21,6 +13,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <errno.h>
+#include <time.h>
 #include <wayland-client.h>
 
 // Include the wlr-data-control protocol
@@ -37,6 +30,7 @@ struct client_state {
     struct wl_seat *seat;
     
     bool running;
+    bool verbose; // Toggle for verbose output
 };
 
 // Global state for signal handling
@@ -45,7 +39,10 @@ static struct client_state *global_state = NULL;
 // Signal handler for clean exit
 static void
 handle_signal(int signum) {
-    printf("\nReceived signal %d, exiting...\n", signum);
+    if (global_state && global_state->verbose) {
+        printf("\nReceived signal %d, exiting...\n", signum);
+    }
+    
     if (global_state) {
         global_state->running = false;
         wl_display_flush(global_state->display);
@@ -63,7 +60,7 @@ receive_clipboard_data(struct client_state *state, const char *mime_type)
     // Create pipes for reading data
     int pipefd[2];
     if (pipe(pipefd) == -1) {
-        perror("pipe");
+        if (state->verbose) perror("pipe");
         return;
     }
     
@@ -82,10 +79,15 @@ receive_clipboard_data(struct client_state *state, const char *mime_type)
     
     if (bytes_read > 0) {
         buffer[bytes_read] = '\0';
-        printf("*** Clipboard content ***\n%s\n********************\n", buffer);
-    } else if (bytes_read == 0) {
-        printf("Empty clipboard data\n");
-    } else {
+        
+        // Just print the clipboard text, nothing else
+        printf("%s\n", buffer);
+        
+        // Flush stdout to ensure immediate output
+        fflush(stdout);
+    } else if (bytes_read == 0 && state->verbose) {
+        printf("(empty clipboard)\n");
+    } else if (state->verbose) {
         perror("read");
     }
 }
@@ -94,7 +96,10 @@ receive_clipboard_data(struct client_state *state, const char *mime_type)
 static void
 data_offer_offer(void *data, struct zwlr_data_control_offer_v1 *offer, const char *mime_type)
 {
-    printf("Data offer with MIME type: %s\n", mime_type);
+    struct client_state *state = data;
+    if (state->verbose) {
+        printf("Data offer with MIME type: %s\n", mime_type);
+    }
 }
 
 static const struct zwlr_data_control_offer_v1_listener data_offer_listener = {
@@ -106,7 +111,10 @@ static void
 data_device_data_offer(void *data, struct zwlr_data_control_device_v1 *device,
                      struct zwlr_data_control_offer_v1 *offer)
 {
-    printf("New data offer received\n");
+    struct client_state *state = data;
+    if (state->verbose) {
+        printf("New data offer received\n");
+    }
     
     zwlr_data_control_offer_v1_add_listener(offer, &data_offer_listener, data);
 }
@@ -117,7 +125,9 @@ data_device_selection(void *data, struct zwlr_data_control_device_v1 *device,
 {
     struct client_state *state = data;
     
-    printf("Selection changed\n");
+    if (state->verbose) {
+        printf("Selection changed\n");
+    }
     
     // Update current offer
     state->current_offer = offer;
@@ -131,7 +141,10 @@ data_device_selection(void *data, struct zwlr_data_control_device_v1 *device,
 static void
 data_device_finished(void *data, struct zwlr_data_control_device_v1 *device)
 {
-    printf("Data device finished\n");
+    struct client_state *state = data;
+    if (state->verbose) {
+        printf("Data device finished\n");
+    }
 }
 
 static const struct zwlr_data_control_device_v1_listener data_device_listener = {
@@ -160,16 +173,22 @@ registry_handle_global(void *data, struct wl_registry *registry,
 {
     struct client_state *state = data;
 
-    printf("Got interface: %s (version %d)\n", interface, version);
+    if (state->verbose) {
+        printf("Got interface: %s (version %d)\n", interface, version);
+    }
 
     if (strcmp(interface, wl_seat_interface.name) == 0) {
         state->seat = wl_registry_bind(registry, id, &wl_seat_interface, 1);
         wl_seat_add_listener(state->seat, &seat_listener, state);
-        printf("Found seat\n");
+        if (state->verbose) {
+            printf("Found seat\n");
+        }
     } else if (strcmp(interface, zwlr_data_control_manager_v1_interface.name) == 0) {
         state->data_control_manager = wl_registry_bind(
             registry, id, &zwlr_data_control_manager_v1_interface, 1);
-        printf("Found wlr_data_control_manager - this compositor supports wlr-data-control!\n");
+        if (state->verbose) {
+            printf("Found wlr_data_control_manager\n");
+        }
     }
 }
 
@@ -185,11 +204,36 @@ static const struct wl_registry_listener registry_listener = {
     .global_remove = registry_handle_global_remove
 };
 
+void print_usage(const char *program_name) {
+    fprintf(stderr, "Usage: %s [options]\n", program_name);
+    fprintf(stderr, "Options:\n");
+    fprintf(stderr, "  -v    Verbose output (show debug information)\n");
+    fprintf(stderr, "  -h    Show this help message\n");
+}
+
 int
 main(int argc, char **argv)
 {
     struct client_state state = { 0 };
     state.running = true;
+    state.verbose = false;
+    
+    // Parse command line arguments
+    int opt;
+    while ((opt = getopt(argc, argv, "vh")) != -1) {
+        switch (opt) {
+            case 'v':
+                state.verbose = true;
+                break;
+            case 'h':
+                print_usage(argv[0]);
+                return 0;
+            default:
+                print_usage(argv[0]);
+                return 1;
+        }
+    }
+    
     global_state = &state;
     
     // Set up signal handlers for clean exit
@@ -203,7 +247,9 @@ main(int argc, char **argv)
         return 1;
     }
     
-    printf("Connected to Wayland display\n");
+    if (state.verbose) {
+        printf("Connected to Wayland display\n");
+    }
 
     // Get the registry
     state.registry = wl_display_get_registry(state.display);
@@ -220,7 +266,11 @@ main(int argc, char **argv)
         zwlr_data_control_device_v1_add_listener(state.data_control_device, 
                                                &data_device_listener, &state);
         
-        printf("Set up wlr-data-control for clipboard monitoring\n");
+        if (state.verbose) {
+            printf("Set up wlr-data-control for clipboard monitoring\n");
+            printf("Monitoring clipboard events. Copy text to see it appear.\n");
+            printf("Press Ctrl+C to exit.\n");
+        }
     } else {
         if (!state.data_control_manager) {
             fprintf(stderr, "wlr-data-control protocol not supported by this compositor.\n");
@@ -233,13 +283,12 @@ main(int argc, char **argv)
         return 1;
     }
 
-    printf("Monitoring clipboard events. Copy text in another application to see it appear here.\n");
-    printf("Press Ctrl+C to exit.\n");
-
     // Main loop
     while (state.running) {
         if (wl_display_dispatch(state.display) == -1) {
-            fprintf(stderr, "Error in dispatch: %s\n", strerror(errno));
+            if (state.verbose) {
+                fprintf(stderr, "Error in dispatch: %s\n", strerror(errno));
+            }
             break;
         }
     }
