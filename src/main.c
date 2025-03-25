@@ -2,7 +2,7 @@
  * Simple Wayland Client using XDG Shell with visible content
  * 
  * This example demonstrates a basic Wayland client that creates a fullscreen window using xdg-shell protocol.
- * Build with: gcc -o simple-wayland simple-wayland.c xdg-shell.c font8x8.c -lwayland-client -lrt
+ * Build with: gcc -o simple-wayland simple-wayland.c xdg-shell.c -lwayland-client -lrt
  */
 
 #include <stdio.h>
@@ -16,7 +16,6 @@
 #include <errno.h>
 #include <wayland-client.h>
 #include "xdg-shell.h"
-#include "font8x8.h"
 
 #define WIDTH 1000
 #define HEIGHT 1000
@@ -66,7 +65,7 @@ create_shm_file(size_t size) {
     return fd;
 }
 
-// Create a buffer with a solid color and text
+// Create a buffer with a solid color
 static struct wl_buffer *
 create_buffer(struct client_state *state, int width, int height) {
     int stride = width * 4; // 4 bytes per pixel (ARGB8888)
@@ -87,21 +86,12 @@ create_buffer(struct client_state *state, int width, int height) {
     // Fill with solid purple color (ARGB8888)
     uint32_t *pixels = data;
     uint32_t bg_color = 0xFFAA00FF; // Purple background color
-    uint32_t text_color = 0xFFFFFFFF; // White text color
     
     for (int i = 0; i < width * height; i++) {
         pixels[i] = bg_color;
     }
     
-    // Draw the "Hello World" text in the center of the window
-    const char *text = "Hello World";
-    int text_width = strlen(text) * 8; // Each character is 8 pixels wide
-    int text_x = (width - text_width) / 2; // Center horizontally
-    int text_y = (height - 8) / 2; // Center vertically (each character is 8 pixels tall)
-    
-    draw_text(pixels, width, text_x, text_y, text, text_color);
-    
-    printf("Drew text \"Hello World\" at position (%d, %d)\n", text_x, text_y);
+    printf("Created solid color buffer %dx%d\n", width, height);
 
     struct wl_shm_pool *pool = wl_shm_create_pool(state->shm, fd, size);
     struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0, width, height,
