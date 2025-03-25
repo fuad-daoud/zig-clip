@@ -2,7 +2,7 @@
  * Simple Wayland Client using XDG Shell with visible content
  * 
  * This example demonstrates a basic Wayland client that creates a fullscreen window using xdg-shell protocol.
- * Build with: gcc -o simple-wayland simple-wayland.c xdg-shell.c -lwayland-client -lrt
+ * Build with: gcc -o main.out src/main.c src/xdg-shell.c src/font8x8.c -lwayland-client -lrt
  */
 
 #include <stdio.h>
